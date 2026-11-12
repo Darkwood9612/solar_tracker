@@ -1,85 +1,98 @@
-/********************************************************************************
- *  Copyright (c) 2025, Vladyslav Merais
- *  All rights reserved.
- *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions are met:
- *
- *  1. Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *
- *  2. Redistributions in binary form must reproduce the above copyright notice,
- *     this list of conditions and the following disclaimer in the documentation
- *     and/or other materials provided with the distribution.
- *
- *  3. Neither the name of Vladyslav Merais nor the names of its
- *     contributors may be used to endorse or promote products derived from
- *     this software without specific prior written permission.
- *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- *  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- *  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- *  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
- *  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- *  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- *  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- *  OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
- *  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- *  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- *  EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- ********************************************************************************/
-
 #include "sun_position.h"
 
-#include <math.h>
+#include <cmath>
 
-constexpr float SECONDS_IN_HOUR = 3600.0f;
-constexpr float MINUTES_IN_HOUR = 60.0f;
-constexpr float DEGREES_PER_HOUR = 15.0f;
-constexpr float JULIAN_DAY_OFFSET = 2451545.0f;
+namespace
+{
+  constexpr double pi = 3.141592653589793238462643383279502884;
+  constexpr double degrees_to_radians = pi / 180.0;
+  constexpr double radians_to_degrees = 180.0 / pi;
 
-static float calculate_julian_date(const GPSData& gps_data) {
-  int year = gps_data.year;
-  int month = gps_data.month;
-  int day = gps_data.day;
+  double normalize_angle(double angle)
+  {
+    angle = fmod(angle, 360.0);
 
-  if (month <= 2) {
-    year--;
-    month += 12;
+    if (angle < 0.0)
+      angle += 360.0;
+
+    return angle;
   }
 
-  int A = year / 100;
-  int B = 2 - A + A / 4;
+  double calculate_julian_date(const solar_tracker::GPSData& gps_data) {
 
-  float julian_date = floor(365.25f * (year + 4716)) + floor(30.6001f * (month + 1)) + day + B - 1524.5f;
-  float time_fraction = (gps_data.hour + gps_data.minute / MINUTES_IN_HOUR + gps_data.second / SECONDS_IN_HOUR) / 24.0f;
+    int year = gps_data.year;
+    int month = gps_data.month;
+    const int day = gps_data.day;
 
-  return julian_date + time_fraction;
-}
+    if (month <= 2) {
+      year--;
+      month += 12;
+    }
 
-void calculate_sun_position(const GPSData& gps_data, float& azimuth, float& elevation) {
-  float julian_date = calculate_julian_date(gps_data);
-  float D = julian_date - JULIAN_DAY_OFFSET;
+    // Gregorian calendar correction
+    const int century = year / 100;
+    const int gregorian_correction = 2 - century + century / 4;
 
-  float mean_anomaly = fmod(357.529f + 0.98560028f * D, 360.0f);
-  float mean_longitude = fmod(280.459f + 0.98564736f * D, 360.0f);
-  float ecliptic_longitude = fmod(mean_longitude + 1.915f * sin(mean_anomaly * DEG_TO_RAD) + 0.020f * sin(2 * mean_anomaly * DEG_TO_RAD), 360.0f);
+    const double julian_date = floor(365.25 * (year + 4716)) + floor(30.6001 * (month + 1)) + day + gregorian_correction - 1524.5;
 
-  float obliquity = 23.439f - 0.00000036f * D;
-  float declination = asin(sin(obliquity * DEG_TO_RAD) * sin(ecliptic_longitude * DEG_TO_RAD)) * RAD_TO_DEG;
+    constexpr double seconds_in_hour = 3600.0;
+    constexpr double minutes_in_hour = 60.0;
+    const double time_fraction = (gps_data.hour + (gps_data.minute / minutes_in_hour) + (gps_data.second / seconds_in_hour)) / 24.0;
 
-  float time_in_hours = gps_data.hour + gps_data.minute / MINUTES_IN_HOUR + gps_data.second / SECONDS_IN_HOUR;
-  float hour_angle = (time_in_hours - 12.0f) * DEGREES_PER_HOUR;
-
-  azimuth = atan2(sin(hour_angle * DEG_TO_RAD),
-                  cos(hour_angle * DEG_TO_RAD) * sin(gps_data.latitude * DEG_TO_RAD) - tan(declination * DEG_TO_RAD) * cos(gps_data.latitude * DEG_TO_RAD))
-            * RAD_TO_DEG;
-
-  azimuth = fmod(azimuth + 180.0f, 360.0f);
-
-  if (azimuth < 0) {
-    azimuth += 360.0f;
+    return julian_date + time_fraction;
   }
 
-  elevation = asin(sin(gps_data.latitude * DEG_TO_RAD) * sin(declination * DEG_TO_RAD) + cos(gps_data.latitude * DEG_TO_RAD) * cos(declination * DEG_TO_RAD) * cos(hour_angle * DEG_TO_RAD)) * RAD_TO_DEG;
+  double calculate_right_ascension_in_radians(const double ecliptic_longitude_in_radians, const double ecliptic_obliquity_in_radians)
+  {
+    return atan2(cos(ecliptic_obliquity_in_radians) * sin(ecliptic_longitude_in_radians), cos(ecliptic_longitude_in_radians));
+  }
+
+  double calculate_hour_angle_in_radians(const solar_tracker::GPSData& gps_data, const double days_since_j2000, const double right_ascension_in_radians)
+  {
+    const double greenwich_sidereal_time = normalize_angle(280.46061837 + 360.98564736629 * days_since_j2000);
+
+    const double local_sidereal_time = normalize_angle(greenwich_sidereal_time + gps_data.longitude);
+
+    const double right_ascension = normalize_angle(right_ascension_in_radians * radians_to_degrees);
+
+    const double hour_angle = normalize_angle(local_sidereal_time - right_ascension);
+
+    return hour_angle * degrees_to_radians;
+  }
+
+} // anonymous namespace
+
+namespace solar_tracker
+{
+  void calculate_sun_position(const GPSData& gps_data, double& out_azimuth, double& out_elevation)
+  {
+    const double julian_date = calculate_julian_date(gps_data);
+
+    constexpr double julian_date_offset = 2451545.0;
+    const double days_since_j2000 = julian_date - julian_date_offset;
+
+    const double mean_anomaly_in_radians = fmod(357.529 + 0.98560028 * days_since_j2000, 360.0) * degrees_to_radians;
+    const double sun_mean_longitude = fmod(280.459 + 0.98564736 * days_since_j2000, 360.0);
+
+    const double equation_of_center = 1.915 * sin(mean_anomaly_in_radians) + 0.020 * sin(2 * mean_anomaly_in_radians);
+    const double ecliptic_longitude = fmod(sun_mean_longitude + equation_of_center, 360.0);
+    const double ecliptic_longitude_in_radians = ecliptic_longitude * degrees_to_radians;
+
+    const double ecliptic_obliquity_in_radians = (23.439 - 0.00000036 * days_since_j2000) * degrees_to_radians;
+
+    const double declination_in_radians = asin(sin(ecliptic_obliquity_in_radians) * sin(ecliptic_longitude_in_radians));
+
+    const double right_ascension_in_radians = calculate_right_ascension_in_radians(ecliptic_longitude_in_radians, ecliptic_obliquity_in_radians);
+    const double hour_angle_in_radians = calculate_hour_angle_in_radians(gps_data, days_since_j2000, right_ascension_in_radians);
+
+    const double latitude_in_radians = gps_data.latitude * degrees_to_radians;
+
+    const double azimuth_in_radians = atan2(sin(hour_angle_in_radians), cos(hour_angle_in_radians) * sin(latitude_in_radians) - tan(declination_in_radians) * cos(latitude_in_radians));
+
+    out_azimuth = normalize_angle(azimuth_in_radians * radians_to_degrees + 180.0);
+
+    const double elevation_in_radians = asin(sin(latitude_in_radians) * sin(declination_in_radians) + cos(latitude_in_radians) * cos(declination_in_radians) * cos(hour_angle_in_radians));
+
+    out_elevation = elevation_in_radians * radians_to_degrees;
+  }
 }
